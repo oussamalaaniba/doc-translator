@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.log
+
+# Virtual envs
+.venv/
+venv/
+.env/
+.env.*
+
+# OS
+.DS_Store
+
+# Local outputs / temp
+outputs/
+tmp/
+.cache/
+
+# Git
+.git/
+eof

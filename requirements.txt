@@ -1,0 +1,9 @@
+streamlit>=1.33
+watchdog
+python-docx
+python-pptx
+pymupdf>=1.23
+python-dotenv
+fastapi
+uvicorn[standard]
+openai
