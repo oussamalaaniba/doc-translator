@@ -69,7 +69,8 @@ def translate_batch(texts, src="fr", tgt="en"):
 
     try:
         from openai import OpenAI
-        client = OpenAI()  # clé lue depuis env/secrets
+        # 🔐 IMPORTANT : on passe explicitement la clé (st.secrets/.env/env)
+        client = OpenAI(api_key=api_key)
 
         out = []
         for t in texts:
@@ -123,37 +124,50 @@ def translate_docx_preserve_styles(src_bytes, src="fr", tgt="en"):
     return bio.read()
 
 # =================== PPTX : préserver styles & template ===================
+def iter_all_shapes(shapes):
+    """Itère sur toutes les formes, y compris à l'intérieur des GroupShapes."""
+    for shape in shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            # récursion dans le groupe
+            yield from iter_all_shapes(shape.shapes)
+        else:
+            yield shape
+
 def _collect_text_runs_from_shape(shape):
     """Retourne les runs (pptx.text.run.TextRun) d'une shape texte ou table."""
     runs = []
+    # Text frames standards / placeholders
     if hasattr(shape, "has_text_frame") and shape.has_text_frame:
         for p in shape.text_frame.paragraphs:
             for r in p.runs:
                 if r.text.strip():
                     runs.append(r)
-    elif shape.shape_type == MSO_SHAPE_TYPE.TABLE:
+
+    # Tables (via has_table ou type TABLE)
+    if getattr(shape, "has_table", False) or shape.shape_type == MSO_SHAPE_TYPE.TABLE:
         table = shape.table
         for row in table.rows:
             for cell in row.cells:
-                # Certaines cellules peuvent ne pas avoir text_frame
                 if hasattr(cell, "text_frame") and cell.text_frame:
                     for p in cell.text_frame.paragraphs:
                         for r in p.runs:
                             if r.text.strip():
                                 runs.append(r)
+
     return runs
 
 def translate_pptx_preserve_styles(src_bytes, src="fr", tgt="en"):
     """
     - Text boxes, placeholders, tables -> traduction run-par-run (styles conservés)
     - Charts -> traduit titres et titres d'axes si accessibles
+    - Groupes -> parcourus récursivement
     - SmartArt/Diagrammes -> non supportés via python-pptx (texte inchangé)
     """
     prs = Presentation(io.BytesIO(src_bytes))
     run_refs = []
 
     for slide in prs.slides:
-        for shape in slide.shapes:
+        for shape in iter_all_shapes(slide.shapes):
             # 1) Text frames & tables
             run_refs.extend(_collect_text_runs_from_shape(shape))
 
@@ -162,41 +176,32 @@ def translate_pptx_preserve_styles(src_bytes, src="fr", tgt="en"):
                 chart = shape.chart
                 # Titre
                 try:
-                    if chart.has_title and chart.chart_title.has_text_frame:
+                    if chart.has_title and hasattr(chart.chart_title, "text_frame"):
                         for p in chart.chart_title.text_frame.paragraphs:
                             for r in p.runs:
                                 if r.text.strip():
                                     run_refs.append(r)
                 except Exception:
                     pass
-                # Axe catégories
-                try:
-                    if hasattr(chart, "category_axis") and chart.category_axis.has_title:
-                        tf = chart.category_axis.axis_title.text_frame
-                        for p in tf.paragraphs:
-                            for r in p.runs:
-                                if r.text.strip():
-                                    run_refs.append(r)
-                except Exception:
-                    pass
-                # Axe valeurs
-                try:
-                    if hasattr(chart, "value_axis") and chart.value_axis.has_title:
-                        tf = chart.value_axis.axis_title.text_frame
-                        for p in tf.paragraphs:
-                            for r in p.runs:
-                                if r.text.strip():
-                                    run_refs.append(r)
-                except Exception:
-                    pass
-                # NOTE: légendes/catégories/séries non éditées ici
+                # Axes
+                for axis_name in ("category_axis", "value_axis", "series_axis"):
+                    try:
+                        axis = getattr(chart, axis_name, None)
+                        if axis and getattr(axis, "has_title", False) and hasattr(axis.axis_title, "text_frame"):
+                            for p in axis.axis_title.text_frame.paragraphs:
+                                for r in p.runs:
+                                    if r.text.strip():
+                                        run_refs.append(r)
+                    except Exception:
+                        pass
+                # NOTE: légendes/étiquettes des séries non modifiées ici
 
     # Traduction
     batch = [r.text for r in run_refs]
     if batch:
         translated = translate_batch(batch, src, tgt)
         for r, new in zip(run_refs, translated):
-            r.text = new
+            r.text = new  # on modifie le run -> police/taille conservées
 
     bio = io.BytesIO()
     prs.save(bio)
@@ -432,5 +437,5 @@ if st.session_state.translated_bytes:
 st.divider()
 st.write("⚙️ Conseils :")
 st.write("- Ajoute ta clé dans `.env` ou dans les *Secrets* Streamlit Cloud (`OPENAI_API_KEY`).")
-st.write("- PPTX : titres/axes de graphiques traduits ; SmartArt/diagrammes non modifiables via `python-pptx` (texte inchangé).")
+st.write("- PPTX : zones de texte, tableaux, titres d’axes et objets groupés pris en charge ; SmartArt/diagrammes non modifiables via `python-pptx`.")
 st.write("- PDF : en Cloud, OCR désactivé. Les PDF *scannés* doivent être traités en local.")
