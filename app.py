@@ -7,6 +7,7 @@ import fitz  # PyMuPDF
 # ========= PPTX =========
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx_utils import translate_pptx_preserve_styles
 
 # =================== Config & état ===================
 st.set_page_config(page_title="Doc Translator", page_icon="🌐", layout="centered")
@@ -123,90 +124,7 @@ def translate_docx_preserve_styles(src_bytes, src="fr", tgt="en"):
     bio.seek(0)
     return bio.read()
 
-# =================== PPTX : préserver styles & template ===================
-def iter_all_shapes(shapes):
-    """Itère sur toutes les formes, y compris à l'intérieur des GroupShapes."""
-    for shape in shapes:
-        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
-            # récursion dans le groupe
-            yield from iter_all_shapes(shape.shapes)
-        else:
-            yield shape
-
-def _collect_text_runs_from_shape(shape):
-    """Retourne les runs (pptx.text.run.TextRun) d'une shape texte ou table."""
-    runs = []
-    # Text frames standards / placeholders
-    if hasattr(shape, "has_text_frame") and shape.has_text_frame:
-        for p in shape.text_frame.paragraphs:
-            for r in p.runs:
-                if r.text.strip():
-                    runs.append(r)
-
-    # Tables (via has_table ou type TABLE)
-    if getattr(shape, "has_table", False) or shape.shape_type == MSO_SHAPE_TYPE.TABLE:
-        table = shape.table
-        for row in table.rows:
-            for cell in row.cells:
-                if hasattr(cell, "text_frame") and cell.text_frame:
-                    for p in cell.text_frame.paragraphs:
-                        for r in p.runs:
-                            if r.text.strip():
-                                runs.append(r)
-
-    return runs
-
-def translate_pptx_preserve_styles(src_bytes, src="fr", tgt="en"):
-    """
-    - Text boxes, placeholders, tables -> traduction run-par-run (styles conservés)
-    - Charts -> traduit titres et titres d'axes si accessibles
-    - Groupes -> parcourus récursivement
-    - SmartArt/Diagrammes -> non supportés via python-pptx (texte inchangé)
-    """
-    prs = Presentation(io.BytesIO(src_bytes))
-    run_refs = []
-
-    for slide in prs.slides:
-        for shape in iter_all_shapes(slide.shapes):
-            # 1) Text frames & tables
-            run_refs.extend(_collect_text_runs_from_shape(shape))
-
-            # 2) Charts: titre & axes (si dispo)
-            if hasattr(shape, "has_chart") and shape.has_chart:
-                chart = shape.chart
-                # Titre
-                try:
-                    if chart.has_title and hasattr(chart.chart_title, "text_frame"):
-                        for p in chart.chart_title.text_frame.paragraphs:
-                            for r in p.runs:
-                                if r.text.strip():
-                                    run_refs.append(r)
-                except Exception:
-                    pass
-                # Axes
-                for axis_name in ("category_axis", "value_axis", "series_axis"):
-                    try:
-                        axis = getattr(chart, axis_name, None)
-                        if axis and getattr(axis, "has_title", False) and hasattr(axis.axis_title, "text_frame"):
-                            for p in axis.axis_title.text_frame.paragraphs:
-                                for r in p.runs:
-                                    if r.text.strip():
-                                        run_refs.append(r)
-                    except Exception:
-                        pass
-                # NOTE: légendes/étiquettes des séries non modifiées ici
-
-    # Traduction
-    batch = [r.text for r in run_refs]
-    if batch:
-        translated = translate_batch(batch, src, tgt)
-        for r, new in zip(run_refs, translated):
-            r.text = new  # on modifie le run -> police/taille conservées
-
-    bio = io.BytesIO()
-    prs.save(bio)
-    bio.seek(0)
-    return bio.read()
+# =================== PPTX : via module (voir pptx_utils.py) ===================
 
 # =================== PDF : utilitaires ===================
 def pdf_has_text(src_bytes, min_chars=20):
@@ -411,7 +329,10 @@ if uploaded:
         if st.button("Traduire PPTX", key="btn_translate_pptx"):
             with st.spinner("Traduction du PPTX en cours…"):
                 try:
-                    translated = translate_pptx_preserve_styles(data, src=src_lang, tgt=tgt_lang)
+                    translated = translate_pptx_preserve_styles(
+                       data, src=src_lang, tgt=tgt_lang, translate_callable=translate_batch
+                    )
+
                     output_name = uploaded.name.replace(".pptx", f"_{tgt_lang}.pptx")
 
                     st.session_state.translated_bytes = translated
