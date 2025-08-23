@@ -3,7 +3,7 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 def iter_all_shapes(shapes):
-    """Itère sur toutes les formes, y compris l'intérieur des GroupShapes."""
+    """Itère sur toutes les formes, y compris à l'intérieur des GroupShapes."""
     for shape in shapes:
         if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
             yield from iter_all_shapes(shape.shapes)
@@ -11,39 +11,41 @@ def iter_all_shapes(shapes):
             yield shape
 
 def _paragraph_text(paragraph):
-    """Reconstruit le texte d'un paragraphe en concaténant les runs (préserve les espaces)."""
-    if paragraph.runs:
-        return "".join(r.text for r in paragraph.runs)
+    """Texte du paragraphe avec les espaces corrects (via .text)."""
     return paragraph.text or ""
 
 def _replace_paragraph_text_keep_font(paragraph, new_text):
-    """Remplace TOUT le paragraphe par un seul run en conservant police/taille du 1er run."""
-    first_run = paragraph.runs[0] if paragraph.runs else None
-    # supprimer tous les runs existants
-    for _ in range(len(paragraph.runs)):
-        r = paragraph.runs[0]
-        r._element.getparent().remove(r._element)
-    # écrire un seul run
-    new_run = paragraph.add_run()
-    new_run.text = new_text
-    # recopier police/taille
-    if first_run:
-        try:
-            if first_run.font.name:
-                new_run.font.name = first_run.font.name
-            if first_run.font.size:
-                new_run.font.size = first_run.font.size
-        except Exception:
-            pass  # si police de thème, on ignore
+    """
+    Remplace le contenu d'un paragraphe SANS supprimer les runs :
+    - met tout le texte dans le 1er run (il garde police/taille),
+    - vide les runs suivants proprement (r.text = ""),
+    - crée 1 run si le paragraphe était vide.
+    """
+    if paragraph.runs:
+        first = paragraph.runs[0]
+        first.text = new_text           # conserve police/size
+        for r in paragraph.runs[1:]:
+            r.text = ""                 # nettoie sans toucher au XML
+    else:
+        run = paragraph.add_run()
+        run.text = new_text
 
 def _translate_text_frame_by_paragraph(text_frame, translate_callable, src, tgt):
-    """Traduit chaque PARAGRAPHE (pas run) pour éviter les pertes d'espaces et le mot-à-mot."""
+    """Traduit chaque PARAGRAPHE (pas run) pour éviter pertes d'espaces et mot-à-mot."""
+    # collecter d'abord -> batch unique -> remplacer
+    para_refs, texts = [], []
     for p in list(text_frame.paragraphs):
         original = _paragraph_text(p)
-        if not original or not original.strip():
-            continue
-        translated = translate_callable([original], src, tgt)[0] if translate_callable else original
-        _replace_paragraph_text_keep_font(p, translated)
+        if original and original.strip():
+            para_refs.append(p)
+            texts.append(original)
+
+    if not para_refs:
+        return
+
+    translated_list = translate_callable(texts, src, tgt) if translate_callable else texts
+    for p, new_text in zip(para_refs, translated_list):
+        _replace_paragraph_text_keep_font(p, new_text)
 
 def _translate_table_by_paragraph(table, translate_callable, src, tgt):
     for row in table.rows:
@@ -59,17 +61,18 @@ def _translate_chart_titles_if_any(shape, translate_callable, src, tgt):
             # Titre du chart
             if chart.has_title and hasattr(chart.chart_title, "text_frame"):
                 _translate_text_frame_by_paragraph(chart.chart_title.text_frame, translate_callable, src, tgt)
-            # Titres d’axes
+            # Titres d’axes (selon versions)
             for axis_name in ("category_axis", "value_axis", "series_axis"):
                 axis = getattr(chart, axis_name, None)
                 if axis and getattr(axis, "has_title", False) and hasattr(axis.axis_title, "text_frame"):
                     _translate_text_frame_by_paragraph(axis.axis_title.text_frame, translate_callable, src, tgt)
     except Exception:
+        # selon la version de python-pptx, certaines propriétés peuvent manquer
         pass
 
 def translate_pptx_preserve_styles(src_bytes, src="fr", tgt="en", translate_callable=None):
     """
-    Traduction PAR PARAGRAPHE (évite perte d'espaces et mot-à-mot).
+    Traduction PAR PARAGRAPHE (évite perte d'espaces et mot-à-mot) avec styles conservés :
     - Zones de texte / placeholders
     - Objets groupés (récursif)
     - Tableaux
@@ -92,4 +95,3 @@ def translate_pptx_preserve_styles(src_bytes, src="fr", tgt="en", translate_call
     prs.save(bio)
     bio.seek(0)
     return bio.read()
-

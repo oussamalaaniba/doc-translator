@@ -1,4 +1,4 @@
-import io, os, tempfile, subprocess, shutil, socket
+import io, os, tempfile, subprocess, shutil
 import streamlit as st
 from dotenv import load_dotenv
 from docx import Document
@@ -36,11 +36,9 @@ for k, v in {
 # =================== Helpers environnement & secrets ===================
 def _get_secret(name, default=None):
     try:
-        if name in st.secrets:
-            return st.secrets.get(name, default)
+        return st.secrets[name]
     except Exception:
-        pass
-    return os.getenv(name, default)
+        return os.getenv(name, default)
 
 def get_openai_key():
     return _get_secret("OPENAI_API_KEY")
@@ -49,9 +47,7 @@ def has_ocr_binary():
     return shutil.which("ocrmypdf") is not None
 
 def is_cloud_environment():
-    """
-    Heuristique simple pour Cloud : pas de binaire OCR ou désactivé via secret/env.
-    """
+    """Heuristique simple pour Cloud : pas de binaire OCR ou désactivé via secret/env."""
     disabled = str(_get_secret("DISABLE_OCR", "0")) == "1"
     return disabled or not has_ocr_binary()
 
@@ -79,13 +75,10 @@ def translate_batch(texts, src="fr", tgt="en"):
             system = (
                 "You are a senior professional translator. Translate for MEANING and natural fluency, "
                 "not word-by-word. Keep the original intent, register, and domain terminology. "
-                "Preserve numbers, units, placeholders (like {name}), and simple punctuation. "
-                "Do not add explanations or metadata."
+                "Preserve numbers, units, placeholders (like {name}), and punctuation. "
+                "Do not add explanations."
             )
-            user = (
-                f"Source language: {src}\nTarget language: {tgt}\n\n"
-                f"Text:\n{t}"
-            )
+            user = f"Source language: {src}\nTarget language: {tgt}\n\nText:\n{t}"
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -94,7 +87,7 @@ def translate_batch(texts, src="fr", tgt="en"):
                 ],
                 temperature=0,
             )
-            # ne PAS strip() les espaces inter-mots
+            # Remplacer l’espace insécable par espace normal
             out.append(resp.choices[0].message.content.replace("\u00A0", " "))
         return out
     except Exception as e:
@@ -131,8 +124,6 @@ def translate_docx_preserve_styles(src_bytes, src="fr", tgt="en"):
     doc.save(bio)
     bio.seek(0)
     return bio.read()
-
-# =================== PPTX : via module (voir pptx_utils.py) ===================
 
 # =================== PDF : utilitaires ===================
 def pdf_has_text(src_bytes, min_chars=20):
@@ -338,9 +329,8 @@ if uploaded:
             with st.spinner("Traduction du PPTX en cours…"):
                 try:
                     translated = translate_pptx_preserve_styles(
-                       data, src=src_lang, tgt=tgt_lang, translate_callable=translate_batch
+                        data, src=src_lang, tgt=tgt_lang, translate_callable=translate_batch
                     )
-
                     output_name = uploaded.name.replace(".pptx", f"_{tgt_lang}.pptx")
 
                     st.session_state.translated_bytes = translated
@@ -366,5 +356,5 @@ if st.session_state.translated_bytes:
 st.divider()
 st.write("⚙️ Conseils :")
 st.write("- Ajoute ta clé dans `.env` ou dans les *Secrets* Streamlit Cloud (`OPENAI_API_KEY`).")
-st.write("- PPTX : zones de texte, tableaux, titres d’axes et objets groupés pris en charge ; SmartArt/diagrammes non modifiables via `python-pptx`.")
-st.write("- PDF : en Cloud, OCR désactivé. Les PDF *scannés* doivent être traités en local.")
+st.write("- PPTX : zones de texte, objets groupés, tableaux, titres/axes de graphiques pris en charge ; SmartArt/texte dans images non modifiables.")
+st.write("- PDF : en Cloud, OCR désactivé. Les PDF scannés doivent être traités en local.")
