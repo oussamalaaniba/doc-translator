@@ -62,36 +62,44 @@ SHOW_OCR_BUTTON = OCR_AVAILABLE_LOCALLY and not RUNNING_IN_CLOUD  # Local OK, Cl
 # =================== Traduction (OpenAI si clé) ===================
 def translate_batch(texts, src="fr", tgt="en"):
     """
-    Traduit une liste de textes. Si pas de clé, renvoie les textes d'origine (mode écho).
+    Traduit une liste de textes.
+    - Si pas de clé: renvoie les textes d'origine (mode test)
+    - Prompt orienté "sens" (pas mot-à-mot), ton neutre/pro.
     """
     api_key = get_openai_key()
     if not api_key:
-        return texts  # mode test (pas de vraie traduction)
+        return texts
 
     try:
         from openai import OpenAI
-        # 🔐 IMPORTANT : on passe explicitement la clé (st.secrets/.env/env)
         client = OpenAI(api_key=api_key)
 
         out = []
         for t in texts:
-            prompt = (
-                f"Translate from {src} to {tgt}. Preserve numbers, punctuation, line breaks, "
-                f"and formatting hints. Output only the translation.\n\nTEXT:\n{t}"
+            system = (
+                "You are a senior professional translator. Translate for MEANING and natural fluency, "
+                "not word-by-word. Keep the original intent, register, and domain terminology. "
+                "Preserve numbers, units, placeholders (like {name}), and simple punctuation. "
+                "Do not add explanations or metadata."
+            )
+            user = (
+                f"Source language: {src}\nTarget language: {tgt}\n\n"
+                f"Text:\n{t}"
             )
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a professional translator."},
-                    {"role": "user", "content": prompt},
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
                 ],
                 temperature=0,
             )
-            out.append(resp.choices[0].message.content.strip())
+            # ne PAS strip() les espaces inter-mots
+            out.append(resp.choices[0].message.content.replace("\u00A0", " "))
         return out
     except Exception as e:
         st.error(f"Erreur API de traduction : {e}")
-        return texts  # fallback
+        return texts
 
 # =================== DOCX : préserver les styles ===================
 def translate_docx_preserve_styles(src_bytes, src="fr", tgt="en"):
