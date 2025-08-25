@@ -94,36 +94,249 @@ def translate_batch(texts, src="fr", tgt="en"):
         st.error(f"Erreur API de traduction : {e}")
         return texts
 
-# =================== DOCX : préserver les styles ===================
-def translate_docx_preserve_styles(src_bytes, src="fr", tgt="en"):
-    doc = Document(io.BytesIO(src_bytes))
-    runs_to_translate = []
 
-    # Paragraphes
-    for p in doc.paragraphs:
-        for r in p.runs:
-            if r.text.strip():
-                runs_to_translate.append(r)
 
-    # Tableaux
+    # =================== DOCX : traduction avancée (fluide + styles globaux) ===================
+import re
+from io import BytesIO
+from docx import Document
+
+# ---- Helpers : parsing UI (facultatif, fonctionne même si rien n'est défini dans l'UI) ----
+def _parse_glossary_csv(csv_text: str) -> dict:
+    """
+    CSV simple: chaque ligne 'source,target'
+    Insensible à la casse pour le repérage côté source.
+    """
+    d = {}
+    if not csv_text:
+        return d
+    for line in csv_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            d[parts[0]] = parts[1]
+    return d
+
+def _parse_dnt_terms(text: str) -> list:
+    """
+    Liste de termes à ne pas traduire. Séparés par ligne ou virgule.
+    """
+    if not text:
+        return []
+    items = []
+    for chunk in re.split(r"[\n,]", text):
+        t = chunk.strip()
+        if t:
+            items.append(t)
+    # supprimer doublons en gardant l'ordre
+    seen = set(); out = []
+    for t in items:
+        k = t.lower()
+        if k not in seen:
+            seen.add(k); out.append(t)
+    return out
+
+# ---- Helpers : protection/normalisation ----------------------------------------------------
+def _normalize_text_after(t: str) -> str:
+    # Espace insécable -> espace normal ; condense espaces multiples (hors sauts de ligne)
+    t = t.replace("\u00A0", " ")
+    # Remplacer séquences >1 espaces par 1, mais laisser \n/\r intacts
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    return t
+
+def _make_token(prefix: str, idx: int) -> str:
+    # tokens sûrs qui ont peu de chances d’être inventés par le modèle
+    return f"[[{prefix}{idx}]]"
+
+def _protect_patterns(text: str) -> tuple[str, dict]:
+    """
+    Protège URLs, emails, {placeholders}, %s/%d, ACRONYMES.
+    Retourne (texte_remplacé, mapping_token->valeur_originale)
+    """
+    mapping = {}
+    idx = 0
+
+    # Patterns
+    patterns = [
+        r"https?://\S+",
+        r"[\w\.-]+@[\w\.-]+\.\w+",
+        r"\{[^{}]+\}",            # {placeholder}
+        r"%[sdif]",               # printf-like
+        r"\b[A-Z]{2,}\b",         # ACRONYMES (2+ majuscules)
+    ]
+
+    def repl(m):
+        nonlocal idx
+        val = m.group(0)
+        key = _make_token("TOK", idx); idx += 1
+        mapping[key] = val
+        return key
+
+    for pat in patterns:
+        text = re.sub(pat, repl, text)
+    return text, mapping
+
+def _protect_terms_ci(text: str, terms: list, prefix: str) -> tuple[str, dict]:
+    """
+    Remplace chaque terme (insensible à la casse) par un token unique.
+    Retourne (texte, mapping token->valeur_originale)
+    """
+    mapping = {}
+    if not terms:
+        return text, mapping
+
+    # trier par longueur (long d’abord) pour éviter les chevauchements
+    terms_sorted = sorted(terms, key=lambda s: len(s), reverse=True)
+    idx = 0
+
+    for term in terms_sorted:
+        # \b aux bords si le terme est "simple", sinon remplacement direct insensible casse
+        t = re.escape(term)
+        pat = rf"(?i){t}"
+        def repl(m):
+            nonlocal idx
+            key = _make_token(prefix, idx); idx += 1
+            mapping[key] = m.group(0)  # conserver le casing d’origine trouvé
+            return key
+        text = re.sub(pat, repl, text)
+    return text, mapping
+
+def _protect_glossary_ci(text: str, glossary: dict) -> tuple[str, dict]:
+    """
+    Pour le glossaire source→cible : remplace le terme source par un token [[GLOS#]].
+    Post-traduction, [[GLOS#]] sera remplacé par la cible imposée.
+    """
+    if not glossary:
+        return text, {}
+
+    # trier par longueur (sources longues d’abord)
+    items = sorted(glossary.items(), key=lambda kv: len(kv[0]), reverse=True)
+    mapping = {}
+    idx = 0
+    for src, tgt in items:
+        pat = rf"(?i){re.escape(src)}"
+        def repl(m):
+            nonlocal idx
+            key = _make_token("GLOS", idx); idx += 1
+            mapping[key] = tgt  # la cible fixée
+            return key
+        text = re.sub(pat, repl, text)
+    return text, mapping
+
+def _preprocess_text_for_translation(t: str, glossary: dict, dnt_terms: list) -> tuple[str, dict]:
+    """
+    Applique protections (TOK), DNT (KEEP) et Glossaire (GLOS).
+    mapping global contient la priorité de restauration: GLOS -> KEEP -> TOK.
+    """
+    t1, map_tok  = _protect_patterns(t)
+    t2, map_keep = _protect_terms_ci(t1, dnt_terms, "KEEP")
+    t3, map_glos = _protect_glossary_ci(t2, glossary)
+    # ordre de restau : GLOS -> KEEP -> TOK
+    return t3, {"GLOS": map_glos, "KEEP": map_keep, "TOK": map_tok}
+
+def _postprocess_translation(t: str, m: dict) -> str:
+    # Restaurer dans l'ordre inverse : GLOS -> KEEP -> TOK
+    for prefix in ("GLOS", "KEEP", "TOK"):
+        for token, val in m.get(prefix, {}).items():
+            t = t.replace(token, val)
+    return _normalize_text_after(t)
+
+# ---- DOCX traversals ----------------------------------------------------------------------
+def _set_paragraph_text_preserve_para_style(p, new_text: str):
+    """
+    Remplace le contenu du paragraphe :
+    - écrit tout dans le 1er run (il garde police/taille),
+    - vide les suivants sans toucher au XML.
+    """
+    if p.runs:
+        p.runs[0].text = new_text
+        for r in p.runs[1:]:
+            r.text = ""
+    else:
+        p.add_run(new_text)
+
+def _collect_paragraph_objects_from_doc(doc: Document):
+    """
+    Collecte tous les paragraphes 'éditables' : corps, tableaux, en-têtes/pieds.
+    Retourne une liste de références de paragraphes.
+    """
+    paras = []
+
+    # Corps
+    paras.extend(doc.paragraphs)
+
+    # Tables du corps
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                for p in cell.paragraphs:
-                    for r in p.runs:
-                        if r.text.strip():
-                            runs_to_translate.append(r)
+                paras.extend(cell.paragraphs)
 
-    batch = [r.text for r in runs_to_translate]
-    if batch:
-        translated = translate_batch(batch, src, tgt)
-        for r, new in zip(runs_to_translate, translated):
-            r.text = new  # styles conservés
+    # En-têtes / pieds
+    for section in doc.sections:
+        for part in (section.header, section.footer):
+            paras.extend(part.paragraphs)
+            for table in part.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        paras.extend(cell.paragraphs)
+    return paras
 
-    bio = io.BytesIO()
-    doc.save(bio)
-    bio.seek(0)
+# ---- Traduction principale pour DOCX -------------------------------------------------------
+def translate_docx_preserve_styles(src_bytes, src="fr", tgt="en"):
+    """
+    Traduction DOCX 'au sens' avec :
+    - Paragraphe par paragraphe (espaces corrects, meilleure qualité),
+    - Corps + tableaux + en-têtes + pieds,
+    - Glossaire (source→cible), Do-Not-Translate, protection tokens/URL/acronymes,
+    - Normalisation espaces.
+    Remarque: le micro-formatage intra-phrase (gras/italique partiels, hyperliens) peut être aplati.
+    """
+
+    # Lire options UI si présentes (sinon vide)
+    glossary_csv = st.session_state.get("glossary_csv", "")  # ex: "serveur,server\nclient,customer"
+    dnt_text     = st.session_state.get("dnt_terms", "")     # ex: "OpenAI\nGPU\nGPT-4o"
+
+    GLOSSARY = _parse_glossary_csv(glossary_csv)
+    DNT      = _parse_dnt_terms(dnt_text)
+
+    doc = Document(BytesIO(src_bytes))
+
+    # 1) Collecte des paragraphes
+    paragraphs = _collect_paragraph_objects_from_doc(doc)
+
+    # 2) Préparation batch (pré-process + collecte pour appel unique)
+    para_refs = []
+    to_translate = []
+    preproc_maps = []
+
+    for p in paragraphs:
+        original = p.text or ""
+        if original.strip():
+            pre, maps = _preprocess_text_for_translation(original, GLOSSARY, DNT)
+            para_refs.append(p)
+            to_translate.append(pre)
+            preproc_maps.append(maps)
+
+    # 3) Traduction en batch (par paquets pour limiter taille des requêtes)
+    translated_all = []
+    BATCH = 50  # ajuste si besoin
+    for i in range(0, len(to_translate), BATCH):
+        chunk = to_translate[i:i+BATCH]
+        out = translate_batch(chunk, src, tgt)  # réutilise ta fonction existante
+        translated_all.extend(out)
+
+    # 4) Post-process + écriture dans le doc
+    for p, tr, maps in zip(para_refs, translated_all, preproc_maps):
+        final_text = _postprocess_translation(tr, maps)
+        _set_paragraph_text_preserve_para_style(p, final_text)
+
+    # 5) Sauvegarde
+    bio = BytesIO()
+    doc.save(bio); bio.seek(0)
     return bio.read()
+
 
 # =================== PDF : utilitaires ===================
 def pdf_has_text(src_bytes, min_chars=20):
