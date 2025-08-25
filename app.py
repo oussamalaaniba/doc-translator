@@ -446,6 +446,20 @@ st.title("🌐 Document Translator (FR → EN) – format conservé")
 src_lang = st.selectbox("Langue source", ["fr", "en", "es", "de"], index=0)
 tgt_lang = st.selectbox("Langue cible", ["en", "fr", "es", "de"], index=1)
 
+with st.expander("⚙️ Options traduction (DOCX)"):
+    st.session_state["glossary_csv"] = st.text_area(
+        "Glossaire source,target (CSV, une paire par ligne)",
+        value=st.session_state.get("glossary_csv", ""),
+        placeholder="serveur,server\nclient,customer"
+    )
+    st.session_state["dnt_terms"] = st.text_area(
+        "Termes à NE PAS traduire (un par ligne ou séparés par des virgules)",
+        value=st.session_state.get("dnt_terms", ""),
+        placeholder="OpenAI\nGPU\nGPT-4o"
+    )
+    st.caption("Astuce : le glossaire force une traduction précise de certains termes. "
+               "Les termes à ne pas traduire (DNT) seront laissés tels quels.")
+
 uploaded = st.file_uploader("Dépose ton fichier .docx, .pptx ou .pdf", type=["docx", "pptx", "pdf"])
 
 if uploaded:
