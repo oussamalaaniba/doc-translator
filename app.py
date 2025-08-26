@@ -1,6 +1,5 @@
 # app.py — Doc Translator + Background image (local & cloud-safe)
-
-import os, io, re, json, time, tempfile, subprocess, shutil, base64
+import os, io, re, json, time, tempfile, subprocess, shutil, base64, zipfile
 from io import BytesIO
 from typing import List, Dict, Tuple, Any, Optional
 from pathlib import Path
@@ -87,13 +86,11 @@ def set_background_auto(default_filename: str = "bg.png", darken: float = 0.35):
         [data-testid="stHeader"] {{
             background: rgba(0,0,0,0);
         }}
-        /* Contenu légèrement translucide pour lisibilité (supprime ce bloc si tu veux 100% transparent) */
         .main .block-container {{
             background: rgba(255,255,255,0.08);
             border-radius: 12px;
             padding: 1rem 1.25rem;
         }}
-        /* Sidebar lisible */
         [data-testid="stSidebar"] > div:first-child {{
             background: rgba(255,255,255,0.75);
             backdrop-filter: blur(4px);
@@ -165,7 +162,7 @@ def translate_batch(texts: List[str], src: str = "fr", tgt: str = "en",
             "Preserve meaning, register, numbers, punctuation. "
             "Do NOT translate tokens like [[TOK#]], [[GLOS#]], [[KEEP#]] nor URLs/emails. "
             "Return STRICT JSON with EXACTLY N items and SAME indices.\n"
-            'Schema: {"items":[{"i":0,"t":"..."}, ...]}\n'
+            'Schema: {\"items\":[{\"i\":0,\"t\":\"...\"}, ...]}\n'
             "If an item is empty, return empty string. No commentary."
         )
         user_payload = {"src": src, "tgt": tgt, "N": n, "items": payload_items}
@@ -231,6 +228,8 @@ NSMAP = {
     "wpg": "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
     "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "dgm": "http://schemas.openxmlformats.org/drawingml/2006/diagram",      # SmartArt
+    "dgm2010": "http://schemas.microsoft.com/office/drawing/2010/diagram",  # SmartArt 2010+
 }
 
 ACRONYM_REGEX = r"\b[A-Z]{3,}\b"
@@ -514,6 +513,64 @@ def _collect_paragraph_objects_from_doc(doc) -> List[Tuple[str, Any]]:
 
     return out
 
+# --- SmartArt translator (DOCX parts in word/diagrams) ---
+def _translate_docx_smartart_parts(docx_bytes: bytes, src: str, tgt: str,
+                                   glossary: Dict[str, str], dnt_terms: List[str]) -> bytes:
+    """
+    Ouvre le DOCX comme un ZIP, modifie word/diagrams/data*.xml :
+    - extrait tous les <a:t> (et <dgm:t> fallback) présents dans le modèle SmartArt
+    - applique le même pré/post-traitement (glossaire, DNT, tokens)
+    - remplace le texte par la traduction
+    """
+    if ET is None:
+        return docx_bytes
+
+    bio_in = BytesIO(docx_bytes)
+    with zipfile.ZipFile(bio_in, "r") as zin:
+        bio_out = BytesIO()
+        with zipfile.ZipFile(bio_out, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            modified = False
+
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+
+                if item.filename.startswith("word/diagrams/") and item.filename.endswith(".xml"):
+                    try:
+                        root = ET.fromstring(data)
+                    except Exception:
+                        # XML non lisible → on copie tel quel
+                        zout.writestr(item, data)
+                        continue
+
+                    # Tous les nœuds de texte dans le modèle SmartArt
+                    nodes = root.xpath(".//a:t | .//dgm:t | .//dgm2010:t", namespaces=NSMAP)
+                    if not nodes:
+                        zout.writestr(item, data)
+                        continue
+
+                    # Pré-traitement + traduction batch
+                    pre_list, maps_list = [], []
+                    for n in nodes:
+                        txt = n.text or ""
+                        pre, maps = _preprocess_text_for_translation(txt, glossary, dnt_terms)
+                        pre_list.append(pre)
+                        maps_list.append(maps)
+
+                    tr_list = translate_batch(pre_list, src=src, tgt=tgt)
+
+                    # Post-traitement + réécriture
+                    for n, tr, maps in zip(nodes, tr_list, maps_list):
+                        n.text = _postprocess_translation(tr, maps)
+
+                    new_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+                    zout.writestr(item, new_xml)
+                    modified = True
+                else:
+                    # Parts non concernées → copie inchangée
+                    zout.writestr(item, data)
+
+        return bio_out.getvalue() if modified else docx_bytes
+
 # --- DOCX pipeline ---
 def translate_docx_preserve_styles(src_bytes: bytes, src: str = "fr", tgt: str = "en") -> bytes:
     if Document is None:
@@ -578,7 +635,10 @@ def translate_docx_preserve_styles(src_bytes: bytes, src: str = "fr", tgt: str =
             refs.append((kind, ref)); to_translate.append(pre); maps_list.append(maps)
 
     if not to_translate:
-        return src_bytes
+        # Aucun paragraphe standard, mais on pourra tout de même traiter SmartArt
+        out_bytes = src_bytes
+        out_bytes = _translate_docx_smartart_parts(out_bytes, src=src, tgt=tgt, glossary=GLOSSARY, dnt_terms=DNT)
+        return out_bytes
 
     translated_all: List[str] = []
     CHUNK = 16
@@ -609,7 +669,14 @@ def translate_docx_preserve_styles(src_bytes: bytes, src: str = "fr", tgt: str =
             _set_dml_para_text(ref, final_text)
 
     bio = BytesIO(); doc.save(bio); bio.seek(0)
-    return bio.read()
+    out_bytes = bio.read()
+
+    # ⬇️ Ajout : passe sur les parts SmartArt (word/diagrams/data*.xml)
+    out_bytes = _translate_docx_smartart_parts(
+        out_bytes, src=src, tgt=tgt, glossary=GLOSSARY, dnt_terms=DNT
+    )
+
+    return out_bytes
 
 # =================== PDF ===================
 def pdf_has_text(src_bytes: bytes, min_chars: int = 20) -> bool:
@@ -800,8 +867,4 @@ if st.session_state.translated_bytes:
 
 st.divider()
 st.write("⚙️ Conseils :")
-st.write("- Image de fond : place **bg.png** à côté de `app.py` (ou configure `BACKGROUND_URL`/`BACKGROUND_BASE64` dans les *Secrets*).")
-st.write("- Ajoute ta clé dans `.env` (local) ou *Secrets* Streamlit Cloud (`OPENAI_API_KEY`).")
-st.write("- DOCX : page de garde + en-têtes/pieds traduits ; **TOC ignorée** (mets-la à jour dans Word).")
-st.write("- PPTX : zones de texte, tableaux, objets groupés (SmartArt/images textuelles non modifiables).")
 st.write("- PDF : en Cloud, OCR désactivé. Les PDF scannés doivent être traités en local.")
