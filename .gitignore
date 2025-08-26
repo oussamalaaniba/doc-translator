@@ -21,3 +21,7 @@ tmp/
 # Git
 .git/
 eof
+.env
+outputs/
+__pycache__/
+*.pyc
