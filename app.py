@@ -172,7 +172,7 @@ def translate_batch(texts: List[str], src: str = "fr", tgt: str = "en",
         for attempt in range(max_retries):
             try:
                 resp = client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model="gpt-4o",
                     messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
                     temperature=0,
                     response_format={"type": "json_object"},
