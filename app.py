@@ -738,11 +738,38 @@ def translate_pdf_overlay(src_bytes: bytes, src: str = "fr", tgt: str = "en") ->
     return out.read()
 
 # =================== UI ===================
+# =================== UI ===================
 st.title("🌐 Document Translator ")
 
-src_lang = st.selectbox("Langue source", ["fr", "en", "es", "de"], index=0)
-tgt_lang = st.selectbox("Langue cible", ["en", "fr", "es", "de"], index=1)
+# === Langues disponibles ===
+LANGUAGES = {
+    "fr": "Français",
+    "en": "Anglais",
+    "es": "Espagnol",
+    "de": "Allemand",
+    "it": "Italien",
+    "pt": "Portugais",
+    "ar": "Arabe",
+    "ja": "Japonais",
+    "zh": "Chinois simplifié",
+    "tr": "Turc",
+}
 
+src_lang = st.selectbox(
+    "Langue source",
+    options=list(LANGUAGES.keys()),
+    format_func=lambda x: LANGUAGES[x],
+    index=0,
+)
+
+tgt_lang = st.selectbox(
+    "Langue cible",
+    options=[k for k in LANGUAGES.keys() if k != src_lang],
+    format_func=lambda x: LANGUAGES[x],
+    index=1,
+)
+
+# =================== Options ===================
 with st.expander("⚙️ Options traduction (DOCX)"):
     st.session_state["glossary_csv"] = st.text_area(
         "Glossaire source,target (CSV, une paire par ligne)",
@@ -756,6 +783,7 @@ with st.expander("⚙️ Options traduction (DOCX)"):
     )
     st.caption("Astuce : le glossaire force une traduction précise. Les DNT seront laissés tels quels.")
 
+# =================== Fichier upload ===================
 uploaded = st.file_uploader("Dépose ton fichier .docx, .pptx ou .pdf", type=["docx", "pptx", "pdf"])
 
 if uploaded:
@@ -770,15 +798,23 @@ if uploaded:
 
     name_lower = uploaded.name.lower()
 
-    # ======== PDF ========
+    # =================== PDF ===================
     if name_lower.endswith(".pdf"):
         if SHOW_OCR_BUTTON:
             if st.button("1) OCR (si scanné) → 2) Traduire PDF", key="btn_translate_pdf_ocr"):
                 with st.spinner("Traitement PDF (OCR si besoin + traduction)…"):
+                    prog = st.progress(0.0)
                     try:
-                        lang_ocr = "fra" if src_lang == "fr" else src_lang
+                        lang_map_ocr = {
+                            "fr": "fra", "en": "eng", "es": "spa", "de": "deu",
+                            "it": "ita", "pt": "por", "ar": "ara", "ja": "jpn",
+                            "zh": "chi_sim", "tr": "tur"
+                        }
+                        lang_ocr = lang_map_ocr.get(src_lang, "eng")
                         ocred = ocr_pdf_with_ocrmypdf(data, lang=lang_ocr)
+                        prog.progress(0.3)
                         translated = translate_pdf_overlay(ocred, src=src_lang, tgt=tgt_lang)
+                        prog.progress(1.0)
                         output_name = uploaded.name.replace(".pdf", f"_{tgt_lang}.pdf")
                         st.session_state.translated_bytes = translated
                         st.session_state.translated_name = output_name
@@ -788,11 +824,14 @@ if uploaded:
                         st.info(f"💾 Fichier enregistré : {save_path}")
                     except Exception as e:
                         st.error(f"Erreur PDF/OCR: {e}")
+                    prog.empty()
 
             if st.button("Traduire PDF (sans OCR)", key="btn_translate_pdf_plain"):
                 with st.spinner("Traduction PDF (sans OCR)…"):
+                    prog = st.progress(0.0)
                     try:
                         translated = translate_pdf_overlay(data, src=src_lang, tgt=tgt_lang)
+                        prog.progress(1.0)
                         output_name = uploaded.name.replace(".pdf", f"_{tgt_lang}.pdf")
                         st.session_state.translated_bytes = translated
                         st.session_state.translated_name = output_name
@@ -802,12 +841,16 @@ if uploaded:
                         st.info(f"💾 Fichier enregistré : {save_path}")
                     except Exception as e:
                         st.error(f"Erreur PDF: {e}")
+                    prog.empty()
+
         else:
             st.warning("☁️ OCR désactivé en cloud. Traduction possible uniquement si le PDF est textuel.")
             if st.button("Traduire PDF (sans OCR)", key="btn_translate_pdf_cloud"):
                 with st.spinner("Traduction PDF (sans OCR)…"):
+                    prog = st.progress(0.0)
                     try:
                         translated = translate_pdf_overlay(data, src=src_lang, tgt=tgt_lang)
+                        prog.progress(1.0)
                         output_name = uploaded.name.replace(".pdf", f"_{tgt_lang}.pdf")
                         st.session_state.translated_bytes = translated
                         st.session_state.translated_name = output_name
@@ -817,13 +860,16 @@ if uploaded:
                         st.info(f"💾 Fichier enregistré : {save_path}")
                     except Exception as e:
                         st.error(f"Erreur PDF: {e}")
+                    prog.empty()
 
-    # ======== DOCX ========
+    # =================== DOCX ===================
     elif name_lower.endswith(".docx"):
         if st.button("Traduire DOCX", key="btn_translate_docx"):
             with st.spinner("Traduction du DOCX en cours…"):
+                prog = st.progress(0.0)
                 try:
                     translated = translate_docx_preserve_styles(data, src=src_lang, tgt=tgt_lang)
+                    prog.progress(1.0)
                     output_name = uploaded.name.replace(".docx", f"_{tgt_lang}.docx")
                     st.session_state.translated_bytes = translated
                     st.session_state.translated_name = output_name
@@ -833,18 +879,21 @@ if uploaded:
                     st.info(f"💾 Fichier enregistré : {save_path}")
                 except Exception as e:
                     st.error(f"Erreur DOCX: {e}")
+                prog.empty()
 
-    # ======== PPTX ========
+    # =================== PPTX ===================
     elif name_lower.endswith(".pptx"):
         if not TRANSLATE_PPTX_AVAILABLE:
             st.error("Le module PPTX n'est pas disponible (pptx_utils manquant).")
         else:
             if st.button("Traduire PPTX", key="btn_translate_pptx"):
                 with st.spinner("Traduction du PPTX en cours…"):
+                    prog = st.progress(0.0)
                     try:
                         translated = translate_pptx_preserve_styles(
                             data, src=src_lang, tgt=tgt_lang, translate_callable=translate_batch
                         )
+                        prog.progress(1.0)
                         output_name = uploaded.name.replace(".pptx", f"_{tgt_lang}.pptx")
                         st.session_state.translated_bytes = translated
                         st.session_state.translated_name = output_name
@@ -854,8 +903,9 @@ if uploaded:
                         st.info(f"💾 Fichier enregistré : {save_path}")
                     except Exception as e:
                         st.error(f"Erreur PPTX: {e}")
+                    prog.empty()
 
-# Download button (common)
+# =================== Bouton de téléchargement commun ===================
 if st.session_state.translated_bytes:
     st.download_button(
         "⬇️ Télécharger le fichier traduit",
