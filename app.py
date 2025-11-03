@@ -131,6 +131,7 @@ def save_output_file(file_bytes: bytes, file_name: str) -> str:
     return path
 
 # =================== OpenAI translate (robust batch) ===================
+# =================== OpenAI translate (robust batch) ===================
 def _clean_json_content(content: str) -> str:
     s = (content or "").strip()
     if s.startswith("```"):
@@ -138,15 +139,25 @@ def _clean_json_content(content: str) -> str:
         s = re.sub(r"^json\n", "", s, flags=re.IGNORECASE)
     return s
 
-def translate_batch(texts: List[str], src: str = "fr", tgt: str = "en",
-                    *, timeout: int = 60, max_retries: int = 3) -> List[str]:
+
+def translate_batch(
+    texts: List[str],
+    src: str = "fr",
+    tgt: str = "en",
+    *,
+    timeout: int = 60,
+    max_retries: int = 3
+) -> List[str]:
     """
     Batch robuste: indexe chaque item, reconstruit par index, complète manquants one-by-one.
+    ✅ Corrigé : utilise GPT-4o et affiche le modèle actif.
     """
     if not texts:
         return []
+
     api_key = get_openai_key()
     if not api_key:
+        st.error("❌ Aucune clé OpenAI détectée. Configurez OPENAI_API_KEY avant de continuer.")
         return texts
 
     inputs = [("" if t is None else str(t)) for t in texts]
@@ -155,6 +166,10 @@ def translate_batch(texts: List[str], src: str = "fr", tgt: str = "en",
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
+
+        # ✅ Nouveau : définir le modèle ici
+        model = "gpt-4o"
+        st.write(f"✅ Modèle actif : {model}")
 
         payload_items = [{"i": i, "t": inputs[i]} for i in range(n)]
         system = (
@@ -172,11 +187,16 @@ def translate_batch(texts: List[str], src: str = "fr", tgt: str = "en",
         for attempt in range(max_retries):
             try:
                 resp = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
                     temperature=0,
                     response_format={"type": "json_object"},
+                    timeout=timeout,
                 )
+
                 content = _clean_json_content(resp.choices[0].message.content or "")
                 obj = json.loads(content)
 
@@ -186,7 +206,8 @@ def translate_batch(texts: List[str], src: str = "fr", tgt: str = "en",
                 if isinstance(items, list):
                     for it in items:
                         try:
-                            i = int(it.get("i", -1)); t = it.get("t", "")
+                            i = int(it.get("i", -1))
+                            t = it.get("t", "")
                         except Exception:
                             continue
                         if 0 <= i < n:
@@ -196,8 +217,11 @@ def translate_batch(texts: List[str], src: str = "fr", tgt: str = "en",
                 if len(got) == n:
                     return out
 
+                # retry missing items
                 missing = [i for i in range(n) if i not in got]
-                st.warning(f"Bulk translation returned {len(got)}/{n}. Retrying {len(missing)} missing item(s) one-by-one.")
+                st.warning(
+                    f"⚠️ GPT-4o a renvoyé {len(got)}/{n} items. Retraitement des {len(missing)} manquants individuellement..."
+                )
                 for i in missing:
                     one = translate_batch([inputs[i]], src, tgt, timeout=timeout, max_retries=1)
                     out[i] = (one[0] if one else inputs[i])
@@ -206,9 +230,11 @@ def translate_batch(texts: List[str], src: str = "fr", tgt: str = "en",
 
             except Exception as e:
                 last_err = e
+                st.warning(f"Erreur API (tentative {attempt+1}/{max_retries}) : {e}")
                 time.sleep(1.2 * (attempt + 1))
 
-        st.warning(f"Bulk translation failed ({last_err}); falling back to one-by-one.")
+        # fallback total
+        st.warning(f"Échec complet de la traduction en lot ({last_err}); passage au mode individuel.")
         out: List[str] = []
         for t in inputs:
             out.extend(translate_batch([t], src, tgt, timeout=timeout, max_retries=1))
@@ -216,8 +242,9 @@ def translate_batch(texts: List[str], src: str = "fr", tgt: str = "en",
         return out
 
     except Exception as e:
-        st.error(f"Erreur API de traduction : {e}")
+        st.error(f"💥 Erreur critique API OpenAI : {e}")
         return texts
+
 
 # =================== DOCX helpers & pipeline ===================
 # WordprocessingML + DrawingML namespaces
